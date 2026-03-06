@@ -14,3 +14,4 @@ fubot.log
 *.bak
 main.cpython-312.py
 ai_filter_old.py
+.env
