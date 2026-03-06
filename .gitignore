@@ -1,4 +1,3 @@
-.env
 __pycache__/
 *.pyc
 *.pyo
@@ -15,5 +14,3 @@ fubot.log
 *.bak
 main.cpython-312.py
 ai_filter_old.py
-api-gpt4o-mini.py
-api-gpt5.py
