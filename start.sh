@@ -116,7 +116,24 @@ else
     echo "[WARN] SKIP_LLM_PREFLIGHT=1 - skipping LLM connectivity check"
 fi
 
-# 8. Run bot
+# 8. Kill any stale instance and clean lock
+LOCK_FILE="$SCRIPT_DIR/.fubot.instance.lock"
+if [ -f "$LOCK_FILE" ]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "[*] Stopping old FuBot instance (PID=$OLD_PID)..."
+        kill "$OLD_PID" 2>/dev/null
+        sleep 2
+    fi
+    rm -f "$LOCK_FILE"
+    echo "[OK] Cleared stale lock"
+fi
+# Also kill any leftover python3 main.py processes
+pkill -f "python3 main.py" 2>/dev/null || true
+pkill -f "python main.py" 2>/dev/null || true
+sleep 1
+
+# 9. Run bot
 echo ""
 echo "========================================="
 echo "  Starting FuBot..."
