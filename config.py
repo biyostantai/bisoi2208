@@ -39,11 +39,68 @@ GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL = os.getenv(
+    "OPENROUTER_BASE_URL",
+    "https://openrouter.ai/api/v1",
+).strip()
+OPENROUTER_DEEPSEEK_MODEL = os.getenv(
+    "OPENROUTER_DEEPSEEK_MODEL",
+    "deepseek/deepseek-v3.2",
+).strip()
+OPENROUTER_DEEPSEEK_ONLY = os.getenv("OPENROUTER_DEEPSEEK_ONLY", "0") == "1"
 OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
 OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", "").strip()
 
-# Optional compatibility mode: route all GPT layers through DeepSeek.
-AI_FORCE_DEEPSEEK_ONLY = os.getenv("AI_FORCE_DEEPSEEK_ONLY", "0") == "1"
+# OpenRouter DeepSeek-only mode: force DeepSeek route/model to OpenRouter.
+def _normalize_openrouter_base(raw_url: str) -> tuple[str, str]:
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return "", ""
+    clean = raw.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    low = clean.lower()
+    marker = "openrouter.ai/"
+    if "openrouter.ai/deepseek/" in low:
+        marker_idx = low.find(marker)
+        tail = clean[marker_idx + len(marker):] if marker_idx >= 0 else ""
+        model_hint = tail.strip("/")
+        return "https://openrouter.ai/api/v1", model_hint
+    if low == "https://openrouter.ai":
+        return "https://openrouter.ai/api/v1", ""
+    return clean, ""
+
+
+def _is_openrouter_key(value: str) -> bool:
+    return str(value or "").strip().startswith("sk-or-")
+
+
+def _pick_openrouter_key() -> str:
+    if _is_openrouter_key(OPENROUTER_API_KEY):
+        return OPENROUTER_API_KEY.strip()
+    if _is_openrouter_key(DEEPSEEK_API_KEY):
+        return DEEPSEEK_API_KEY.strip()
+    if _is_openrouter_key(GPT_API_KEY):
+        return GPT_API_KEY.strip()
+    return ""
+
+
+OPENROUTER_BASE_URL, _openrouter_model_hint = _normalize_openrouter_base(
+    OPENROUTER_BASE_URL
+)
+if _openrouter_model_hint:
+    OPENROUTER_DEEPSEEK_MODEL = _openrouter_model_hint
+
+if OPENROUTER_DEEPSEEK_ONLY:
+    DEEPSEEK_BASE_URL = OPENROUTER_BASE_URL or DEEPSEEK_BASE_URL
+    DEEPSEEK_MODEL = OPENROUTER_DEEPSEEK_MODEL or DEEPSEEK_MODEL
+    _or_api_key = _pick_openrouter_key()
+    if _or_api_key:
+        DEEPSEEK_API_KEY = _or_api_key
+
+# Optional compatibility mode: route all GPT layers through DeepSeek route.
+AI_FORCE_DEEPSEEK_ONLY = (
+    os.getenv("AI_FORCE_DEEPSEEK_ONLY", "0") == "1" or OPENROUTER_DEEPSEEK_ONLY
+)
 if AI_FORCE_DEEPSEEK_ONLY:
     GPT_BASE_URL = DEEPSEEK_BASE_URL or GPT_BASE_URL
     GPT_API_KEY = DEEPSEEK_API_KEY or GPT_API_KEY
@@ -333,6 +390,17 @@ GPT_L5_ADVISORY_PENALTY = int(os.getenv("GPT_L5_ADVISORY_PENALTY", "0"))
 AI_TIME_BUDGET_SEC = int(os.getenv("AI_TIME_BUDGET_SEC", "50"))
 AI_MIN_BUDGET_FLOOR_SEC = float(os.getenv("AI_MIN_BUDGET_FLOOR_SEC", "8"))
 AI_TIMEOUT_SAFETY_SEC = float(os.getenv("AI_TIMEOUT_SAFETY_SEC", "1.5"))
+AI_LLM_MIN_TIMEOUT_SEC = float(os.getenv("AI_LLM_MIN_TIMEOUT_SEC", "2.5"))
+AI_LLM_TIMEOUT_RATIO = float(os.getenv("AI_LLM_TIMEOUT_RATIO", "0.50"))
+AI_STEP1_TIMEOUT_CAP_SEC = float(os.getenv("AI_STEP1_TIMEOUT_CAP_SEC", "3.5"))
+AI_STEP1_TIMEOUT_CAP_DEEPSEEK_ONLY_SEC = float(
+    os.getenv("AI_STEP1_TIMEOUT_CAP_DEEPSEEK_ONLY_SEC", "3.0")
+)
+AI_DEEPSEEK_ONLY_L2_LOCAL = os.getenv("AI_DEEPSEEK_ONLY_L2_LOCAL", "1") == "1"
+AI_ADAPTIVE_L3_ENSEMBLE = os.getenv("AI_ADAPTIVE_L3_ENSEMBLE", "1") == "1"
+AI_L3_MIN_TIMEOUT_FOR_ENSEMBLE = float(
+    os.getenv("AI_L3_MIN_TIMEOUT_FOR_ENSEMBLE", "4.8")
+)
 AI_MIN_REMAIN_STEP3_SEC = int(os.getenv("AI_MIN_REMAIN_STEP3_SEC", "14"))
 AI_MIN_REMAIN_STEP2_SEC = int(os.getenv("AI_MIN_REMAIN_STEP2_SEC", "9"))
 AI_MIN_BUDGET_TO_START_SEC = int(os.getenv("AI_MIN_BUDGET_TO_START_SEC", "12"))

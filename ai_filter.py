@@ -1027,11 +1027,15 @@ def _effective_timeout(
     timeout_override: float | None = None,
 ) -> float:
     """Clamp timeout for each request to keep AI pipeline within scan budget."""
+    min_timeout = max(
+        1.5,
+        float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+    )
     timeout_value = float(configured_timeout)
     if timeout_override is not None:
         timeout_value = min(timeout_value, float(timeout_override))
     timeout_value = min(timeout_value, float(hard_cap))
-    return max(4.0, timeout_value)
+    return max(min_timeout, timeout_value)
 
 
 def _call_gpt(system_prompt: str, user_prompt: str,
@@ -1630,6 +1634,13 @@ Make your final decision. Return JSON only."""
                 max(1, int(getattr(config, "GPT_PARALLEL_HARD_LIMIT", 3))),
             ),
         )
+        if bool(getattr(config, "AI_ADAPTIVE_L3_ENSEMBLE", True)):
+            timeout_hint = float(timeout_sec or 0.0)
+            min_for_ensemble = float(
+                getattr(config, "AI_L3_MIN_TIMEOUT_FOR_ENSEMBLE", 4.8)
+            )
+            if 0.0 < timeout_hint < min_for_ensemble:
+                fanout = 1
         quorum = max(1, min(fanout, int(config.GPT_L3_QUORUM)))
 
         if fanout == 1:
@@ -2612,20 +2623,43 @@ def analyze_trade(
     logger.info(
         f"  ⏳ AI budget: {budget_sec:.1f}s | score gate={required_score:.1f}/10"
     )
+    logger.info(
+        "  ⚙️ Timeout profile: min=%.1fs ratio=%.2f gpt_cap=%.1fs ds_cap=%.1fs",
+        float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+        float(getattr(config, "AI_LLM_TIMEOUT_RATIO", 0.60)),
+        min(float(config.GPT_TIMEOUT_SEC), float(config.GPT_TIMEOUT_HARD_CAP_SEC)),
+        min(float(config.DEEPSEEK_TIMEOUT_SEC), float(config.DEEPSEEK_TIMEOUT_HARD_CAP_SEC)),
+    )
 
     def _remaining_budget() -> float:
         return max(0.0, budget_deadline - time.time())
 
     def _gpt_timeout_from_remaining(remaining_sec: float) -> float:
+        min_timeout = max(
+            1.5,
+            float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+        )
+        timeout_ratio = float(getattr(config, "AI_LLM_TIMEOUT_RATIO", 0.60))
+        timeout_ratio = max(0.30, min(0.95, timeout_ratio))
         cap = min(float(config.GPT_TIMEOUT_SEC), float(config.GPT_TIMEOUT_HARD_CAP_SEC))
-        return max(4.0, min(cap, max(4.0, remaining_sec - config.AI_TIMEOUT_SAFETY_SEC)))
+        budget_limit = max(min_timeout, remaining_sec * timeout_ratio)
+        remain_limit = max(min_timeout, remaining_sec - config.AI_TIMEOUT_SAFETY_SEC)
+        return max(min_timeout, min(cap, budget_limit, remain_limit))
 
     def _deepseek_timeout_from_remaining(remaining_sec: float) -> float:
+        min_timeout = max(
+            1.5,
+            float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+        )
+        timeout_ratio = float(getattr(config, "AI_LLM_TIMEOUT_RATIO", 0.60))
+        timeout_ratio = max(0.30, min(0.95, timeout_ratio))
         cap = min(
             float(config.DEEPSEEK_TIMEOUT_SEC),
             float(config.DEEPSEEK_TIMEOUT_HARD_CAP_SEC),
         )
-        return max(4.0, min(cap, max(4.0, remaining_sec - config.AI_TIMEOUT_SAFETY_SEC)))
+        budget_limit = max(min_timeout, remaining_sec * timeout_ratio)
+        remain_limit = max(min_timeout, remaining_sec - config.AI_TIMEOUT_SAFETY_SEC)
+        return max(min_timeout, min(cap, budget_limit, remain_limit))
 
     # ══ PRE-SCORE: tính playbook score trước (pure Python, không gọi API) ══
     pre_playbook = _build_pair_playbook_score(symbol, direction, indicators, macro_data)
@@ -2706,30 +2740,82 @@ def analyze_trade(
             ai_budget_remaining_sec=max(0.0, budget_deadline - time.time()),
         )
 
-    # ══ STEP 1: L1 + L2 SONG SONG ══
-    logger.info(f"  ▶ Step 1: L1 + L2 PARALLEL...")
+    # ══ STEP 1: L1 + L2 ══
+    deepseek_only_l2_local = bool(
+        getattr(config, "AI_FORCE_DEEPSEEK_ONLY", False)
+        and getattr(config, "AI_DEEPSEEK_ONLY_L2_LOCAL", True)
+    )
+    if deepseek_only_l2_local:
+        logger.info("  ▶ Step 1: L1 LLM + L2 LOCAL (DeepSeek-only)")
+    else:
+        logger.info("  ▶ Step 1: L1 + L2 PARALLEL...")
     step1_start = time.time()
     remaining_before_step1 = _remaining_budget()
-    step1_timeout = _gpt_timeout_from_remaining(remaining_before_step1)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_l1 = pool.submit(
-            layer1_market_analyst,
+    step1_timeout_base = _gpt_timeout_from_remaining(remaining_before_step1)
+    min_llm_timeout = max(
+        1.5,
+        float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+    )
+    step1_timeout_cap = max(
+        min_llm_timeout,
+        float(getattr(config, "AI_STEP1_TIMEOUT_CAP_SEC", 3.5)),
+    )
+    if bool(getattr(config, "AI_FORCE_DEEPSEEK_ONLY", False)):
+        step1_timeout_cap = max(
+            min_llm_timeout,
+            float(
+                getattr(
+                    config,
+                    "AI_STEP1_TIMEOUT_CAP_DEEPSEEK_ONLY_SEC",
+                    3.0,
+                )
+            ),
+        )
+    step1_timeout = max(min_llm_timeout, min(step1_timeout_base, step1_timeout_cap))
+
+    if deepseek_only_l2_local:
+        logger.info(
+            "  ⚡ Step 1 optimization: DeepSeek-only mode -> L1 via LLM, L2 local fallback"
+        )
+        analyst = layer1_market_analyst(
             symbol,
             indicators,
             macro_text,
             step1_timeout,
         )
-        fut_l2 = pool.submit(
-            layer2_risk_manager,
+        risk = _fallback_l2_from_indicators(
             symbol,
             indicators,
-            step1_timeout,
+            "L2 local fallback in DeepSeek-only mode",
         )
-        analyst = fut_l1.result()
-        risk = fut_l2.result()
+        logger.info(
+            "  [L2 Risk] %s: local fallback risk=%s score=%s safe=%s",
+            symbol,
+            risk.get("risk_level"),
+            risk.get("risk_score"),
+            risk.get("safe_to_trade"),
+        )
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_l1 = pool.submit(
+                layer1_market_analyst,
+                symbol,
+                indicators,
+                macro_text,
+                step1_timeout,
+            )
+            fut_l2 = pool.submit(
+                layer2_risk_manager,
+                symbol,
+                indicators,
+                step1_timeout,
+            )
+            analyst = fut_l1.result()
+            risk = fut_l2.result()
     step1_time = round(time.time() - step1_start, 2)
+    step1_mode = "l1_llm+l2_local" if deepseek_only_l2_local else "parallel"
     logger.info(
-        f"  ⏱️ Step 1 done: {step1_time}s (parallel, timeout={step1_timeout:.1f}s)"
+        f"  ⏱️ Step 1 done: {step1_time}s ({step1_mode}, timeout={step1_timeout:.1f}s)"
     )
 
     # ══ FAST EXIT #1: L1+L2 quá yếu → skip ngay, không tốn thêm API call ══
@@ -2946,6 +3032,10 @@ def analyze_trade(
     step3_start = time.time()
     step3_gpt_timeout = _gpt_timeout_from_remaining(remain_before_step3)
     step3_deepseek_timeout = _deepseek_timeout_from_remaining(remain_before_step3)
+    min_llm_timeout = max(
+        1.5,
+        float(getattr(config, "AI_LLM_MIN_TIMEOUT_SEC", 2.5)),
+    )
 
     step3_mode = "full_6layer"
     layers_called = 6
@@ -2953,11 +3043,11 @@ def analyze_trade(
 
     if config.AI_FAST_3L_MODE:
         fast3l_deepseek_timeout_cap = max(
-            4.0, float(config.FAST3L_DEEPSEEK_TIMEOUT_SEC)
+            min_llm_timeout, float(config.FAST3L_DEEPSEEK_TIMEOUT_SEC)
         )
         fast3l_penalty = max(0, int(config.FAST3L_DEEPSEEK_FALLBACK_PENALTY))
         step3_deepseek_timeout = max(
-            4.0, min(step3_deepseek_timeout, fast3l_deepseek_timeout_cap)
+            min_llm_timeout, min(step3_deepseek_timeout, fast3l_deepseek_timeout_cap)
         )
         if not deepseek_available:
             total_time = round(time.time() - total_start, 2)
@@ -3103,13 +3193,18 @@ def analyze_trade(
         }
 
         if can_run_deepseek_assist:
-            assist_timeout_cap = max(4.0, float(config.AI_DEEPSEEK_ASSIST_TIMEOUT_SEC))
+            assist_timeout_cap = max(
+                min_llm_timeout, float(config.AI_DEEPSEEK_ASSIST_TIMEOUT_SEC)
+            )
             assist_timeout = max(
-                4.0,
+                min_llm_timeout,
                 min(
                     step3_deepseek_timeout,
                     assist_timeout_cap,
-                    max(4.0, remain_before_assist - float(config.AI_TIMEOUT_SAFETY_SEC)),
+                    max(
+                        min_llm_timeout,
+                        remain_before_assist - float(config.AI_TIMEOUT_SAFETY_SEC),
+                    ),
                 ),
             )
             logger.info(

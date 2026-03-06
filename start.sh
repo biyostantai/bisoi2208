@@ -50,25 +50,50 @@ echo "[OK] .env found"
 # 5. OpenRouter DeepSeek v3.2 only mode (default ON)
 # Disable with: OPENROUTER_DEEPSEEK_ONLY=0 bash start.sh
 if [ "${OPENROUTER_DEEPSEEK_ONLY:-1}" = "1" ]; then
+    export OPENROUTER_DEEPSEEK_ONLY=1
     export AI_FORCE_DEEPSEEK_ONLY=1
-    export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://openrouter.ai/api/v1}"
-    export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek/deepseek-v3.2}"
+    export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+    export OPENROUTER_DEEPSEEK_MODEL="${OPENROUTER_DEEPSEEK_MODEL:-deepseek/deepseek-v3.2}"
+    case "${OPENROUTER_BASE_URL}" in
+        *openrouter.ai/deepseek/*)
+            if [ -z "${OPENROUTER_DEEPSEEK_MODEL:-}" ] || [ "${OPENROUTER_DEEPSEEK_MODEL}" = "deepseek/deepseek-v3.2" ]; then
+                export OPENROUTER_DEEPSEEK_MODEL="${OPENROUTER_BASE_URL#*openrouter.ai/}"
+            fi
+            export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+            ;;
+    esac
+    export DEEPSEEK_BASE_URL="$OPENROUTER_BASE_URL"
+    export DEEPSEEK_MODEL="$OPENROUTER_DEEPSEEK_MODEL"
 
-    # Optional shortcut: OPENROUTER_API_KEY can be used instead of DEEPSEEK_API_KEY.
-    if [ -n "${OPENROUTER_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    # Key priority for DeepSeek/OpenRouter route:
+    # 1) OPENROUTER_API_KEY, 2) GPT_API_KEY if sk-or-..., 3) DEEPSEEK_API_KEY if sk-or-...
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
         export DEEPSEEK_API_KEY="$OPENROUTER_API_KEY"
+    elif [ -n "${GPT_API_KEY:-}" ]; then
+        case "${GPT_API_KEY}" in
+            sk-or-*) export DEEPSEEK_API_KEY="${GPT_API_KEY}" ;;
+        esac
+    elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+        case "${DEEPSEEK_API_KEY}" in
+            sk-or-*) export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY}" ;;
+        esac
     fi
 
     # Keep GPT vars aligned for legacy paths.
-    if [ -n "${DEEPSEEK_API_KEY:-}" ] && [ -z "${GPT_API_KEY:-}" ]; then
-        export GPT_API_KEY="$DEEPSEEK_API_KEY"
+    if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+        export GPT_API_KEY="${DEEPSEEK_API_KEY}"
     fi
-    export GPT_BASE_URL="${GPT_BASE_URL:-$DEEPSEEK_BASE_URL}"
-    export GPT_MODEL="${GPT_MODEL:-$DEEPSEEK_MODEL}"
+    export GPT_BASE_URL="$DEEPSEEK_BASE_URL"
+    export GPT_MODEL="$DEEPSEEK_MODEL"
+    export AI_FAST_3L_MODE=1
+    export AI_GPT_ONLY_MODE=0
+    export GPT_L3_ENSEMBLE=1
+    export GPT_L3_QUORUM=1
 
     # Optional OpenRouter attribution headers.
     export OPENROUTER_X_TITLE="${OPENROUTER_X_TITLE:-fubot}"
     echo "[OK] OpenRouter DeepSeek-only mode ON (${DEEPSEEK_MODEL})"
+    echo "[OK] Fast profile ON (FAST3L=1, GPT-only=0, L3 ensemble=1/1)"
 else
     echo "[INFO] OpenRouter DeepSeek-only mode OFF (OPENROUTER_DEEPSEEK_ONLY=0)"
 fi

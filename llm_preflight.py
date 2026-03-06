@@ -27,6 +27,10 @@ def _is_openrouter(url: str) -> bool:
     return "openrouter.ai" in str(url or "").lower()
 
 
+def _is_openrouter_key(value: str) -> bool:
+    return str(value or "").strip().startswith("sk-or-")
+
+
 def _headers(api_key: str, url: str) -> dict:
     h = {
         "Content-Type": "application/json",
@@ -116,6 +120,29 @@ def main() -> int:
     print("FuBot LLM preflight")
     print("=" * 56)
 
+    if bool(getattr(config, "OPENROUTER_DEEPSEEK_ONLY", False)):
+        print("[MODE] OpenRouter DeepSeek-only: ON")
+        ds_base = str(getattr(config, "DEEPSEEK_BASE_URL", "")).strip()
+        ds_model = str(getattr(config, "DEEPSEEK_MODEL", "")).strip()
+        ds_key = str(getattr(config, "DEEPSEEK_API_KEY", "")).strip()
+        expected_model = str(
+            getattr(config, "OPENROUTER_DEEPSEEK_MODEL", "deepseek/deepseek-v3.2")
+        ).strip()
+
+        if not _is_openrouter(ds_base):
+            print(f"[MODE] FAIL: DEEPSEEK_BASE_URL must be OpenRouter, got: {ds_base}")
+            return 1
+        if not _is_openrouter_key(ds_key):
+            print(
+                "[MODE] FAIL: OpenRouter mode requires sk-or-... API key "
+                "(set OPENROUTER_API_KEY or DEEPSEEK_API_KEY/GPT_API_KEY with sk-or- prefix)"
+            )
+            return 1
+        if ds_model != expected_model:
+            print(
+                f"[MODE] WARN: model is '{ds_model}', expected '{expected_model}' for this profile"
+            )
+
     routes = [
         ("GPT", config.GPT_BASE_URL, config.GPT_API_KEY, config.GPT_MODEL),
         (
@@ -144,4 +171,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
