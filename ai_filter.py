@@ -916,11 +916,43 @@ def _is_hint_rejection(error_text: str) -> bool:
     return mentions_hint and is_schema_error
 
 
+def _is_openrouter_url(url: str) -> bool:
+    return "openrouter.ai" in str(url or "").strip().lower()
+
+
+def _openrouter_extra_headers() -> dict:
+    headers: dict[str, str] = {}
+    referer = str(getattr(config, "OPENROUTER_HTTP_REFERER", "")).strip()
+    title = str(getattr(config, "OPENROUTER_X_TITLE", "")).strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+    return headers
+
+
+def _format_llm_http_error(code: int, err_text: str, url: str, model: str) -> str:
+    lowered = str(err_text or "").lower()
+    provider = "OpenRouter" if _is_openrouter_url(url) else "LLM provider"
+    if code == 401 and "user not found" in lowered:
+        return (
+            f"{provider} auth failed (401 User not found) for model '{model}'. "
+            f"Check API key/account/billing. Raw: {str(err_text)[:220]}"
+        )
+    return f"LLM HTTP {code}: {str(err_text)[:300]}"
+
+
 def _call_api(system_prompt: str, user_prompt: str,
               temperature: float, base_url: str, api_key: str,
               model: str, max_tokens: int = 500,
               timeout: int = 30) -> dict:
     """Generic API call — OpenAI-compatible format."""
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise RuntimeError(
+            f"LLM auth missing: empty API key for model '{model}' at '{base_url}'."
+        )
+
     url = base_url.rstrip("/")
     # Smart URL construction: avoid double /v1
     if url.endswith("/chat/completions"):
@@ -948,6 +980,8 @@ def _call_api(system_prompt: str, user_prompt: str,
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
+    if _is_openrouter_url(url):
+        headers.update(_openrouter_extra_headers())
 
     raw = None
     start = time.time()
@@ -974,7 +1008,9 @@ def _call_api(system_prompt: str, user_prompt: str,
                     "GPT speed hints rejected by proxy/API; retrying without hints."
                 )
                 continue
-            raise RuntimeError(f"LLM HTTP {e.code}: {err_text[:300]}") from e
+            raise RuntimeError(
+                _format_llm_http_error(e.code, err_text, url, model)
+            ) from e
     elapsed = round(time.time() - start, 2)
     if raw is None:
         raise RuntimeError("LLM call failed without response payload")
@@ -1015,11 +1051,53 @@ def _call_gpt(system_prompt: str, user_prompt: str,
     )
     token_cap = int(max_tokens if max_tokens is not None else config.GPT_MAX_TOKENS)
     token_cap = max(120, token_cap)
-    return _call_api(
-        fast_prefix + system_prompt, user_prompt, temperature,
-        config.GPT_BASE_URL, config.GPT_API_KEY, config.GPT_MODEL,
-        max_tokens=token_cap, timeout=timeout,
-    )
+    gpt_base = str(getattr(config, "GPT_BASE_URL", "")).strip()
+    gpt_key = str(getattr(config, "GPT_API_KEY", "")).strip()
+    gpt_model = str(getattr(config, "GPT_MODEL", "")).strip()
+
+    try:
+        return _call_api(
+            fast_prefix + system_prompt, user_prompt, temperature,
+            gpt_base, gpt_key, gpt_model,
+            max_tokens=token_cap, timeout=timeout,
+        )
+    except Exception as gpt_err:
+        ds_base = str(getattr(config, "DEEPSEEK_BASE_URL", "")).strip()
+        ds_key = str(getattr(config, "DEEPSEEK_API_KEY", "")).strip()
+        ds_model = str(getattr(config, "DEEPSEEK_MODEL", "")).strip()
+        same_route = (
+            ds_base == gpt_base
+            and ds_key == gpt_key
+            and ds_model == gpt_model
+        )
+        err_text = str(gpt_err).lower()
+        should_fallback = (
+            bool(ds_base and ds_key and ds_model)
+            and not same_route
+            and (
+                bool(getattr(config, "AI_FORCE_DEEPSEEK_ONLY", False))
+                or "user not found" in err_text
+                or "llm http 401" in err_text
+                or "llm auth missing" in err_text
+            )
+        )
+        if not should_fallback:
+            raise
+
+        logger.warning(
+            "GPT route failed, retry with DEEPSEEK route: %s",
+            str(gpt_err)[:180],
+        )
+        try:
+            return _call_api(
+                fast_prefix + system_prompt, user_prompt, temperature,
+                ds_base, ds_key, ds_model,
+                max_tokens=token_cap, timeout=timeout,
+            )
+        except Exception as ds_err:
+            raise RuntimeError(
+                f"GPT route failed: {gpt_err} | DeepSeek fallback failed: {ds_err}"
+            ) from ds_err
 
 
 def _call_deepseek(
@@ -2506,6 +2584,8 @@ def analyze_trade(
     )
     if score_only_mode:
         logger.info("  📡 Local stack: playbook + orderflow + microstructure + BTC filter")
+    elif bool(getattr(config, "AI_FORCE_DEEPSEEK_ONLY", False)):
+        logger.info("  📡 DeepSeek-only mode: L1+L2+L3+L5 remapped to DeepSeek API")
     elif config.AI_FAST_3L_MODE:
         logger.info("  📡 FAST3L stack: GPT L1+L2 + DeepSeek L4")
     elif config.AI_GPT_ONLY_MODE:
@@ -2670,7 +2750,7 @@ def analyze_trade(
         # Nếu L1 timeout (fallback) + pre-score đủ cao → bỏ qua L1 check, tiếp tục L3
         if l1_is_fallback and pre_score >= fallback_bypass_score:
             logger.info(
-                f"  ⚠️ L1 fallback (timeout) nhưng pre-score={pre_score:.1f}≥{fallback_bypass_score:.1f} "
+                f"  ⚠️ L1 fallback (LLM error/timeout) nhưng pre-score={pre_score:.1f}≥{fallback_bypass_score:.1f} "
                 "→ bypass L1 check, tiếp tục L3"
             )
         else:

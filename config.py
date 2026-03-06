@@ -39,6 +39,15 @@ GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", "").strip()
+
+# Optional compatibility mode: route all GPT layers through DeepSeek.
+AI_FORCE_DEEPSEEK_ONLY = os.getenv("AI_FORCE_DEEPSEEK_ONLY", "0") == "1"
+if AI_FORCE_DEEPSEEK_ONLY:
+    GPT_BASE_URL = DEEPSEEK_BASE_URL or GPT_BASE_URL
+    GPT_API_KEY = DEEPSEEK_API_KEY or GPT_API_KEY
+    GPT_MODEL = DEEPSEEK_MODEL or GPT_MODEL
 
 # ============ TRADING ============
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "20"))

@@ -48,8 +48,23 @@ echo ─────────────────────────
 echo.
 
 cd /d "%~dp0"
+
+if /I not "%SKIP_LLM_PREFLIGHT%"=="1" (
+    echo [3.5/4] LLM preflight...
+    %PYTHON_CMD% llm_preflight.py
+    if %errorlevel% neq 0 (
+        echo [ERROR] LLM preflight failed. Check API key/base/model in .env
+        pause
+        exit /b 1
+    )
+) else (
+    echo [3.5/4] Skip LLM preflight (SKIP_LLM_PREFLIGHT=1)
+)
+
 %PYTHON_CMD% main.py
 
 echo.
 echo Bot đã dừng.
 pause
+
+

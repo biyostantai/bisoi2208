@@ -1,11 +1,14 @@
 #!/bin/bash
-# FuBot v6.0 — One-command VPS deployment
+# FuBot v6.0 - One-command VPS deployment
 # Usage: bash start.sh
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "========================================="
-echo "  FuBot v6.0 — VPS Setup & Start"
+echo "  FuBot v6.0 - VPS Setup & Start"
 echo "========================================="
 
 # 1. Check Python 3.10+
@@ -44,19 +47,55 @@ if [ ! -f ".env" ]; then
 fi
 echo "[OK] .env found"
 
-# 5. Quick validation
-python3 -c "import config; print(f'[OK] Config loaded — {len(config.COINS)} coins')" || {
+# 5. OpenRouter DeepSeek v3.2 only mode (default ON)
+# Disable with: OPENROUTER_DEEPSEEK_ONLY=0 bash start.sh
+if [ "${OPENROUTER_DEEPSEEK_ONLY:-1}" = "1" ]; then
+    export AI_FORCE_DEEPSEEK_ONLY=1
+    export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://openrouter.ai/api/v1}"
+    export DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek/deepseek-v3.2}"
+
+    # Optional shortcut: OPENROUTER_API_KEY can be used instead of DEEPSEEK_API_KEY.
+    if [ -n "${OPENROUTER_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+        export DEEPSEEK_API_KEY="$OPENROUTER_API_KEY"
+    fi
+
+    # Keep GPT vars aligned for legacy paths.
+    if [ -n "${DEEPSEEK_API_KEY:-}" ] && [ -z "${GPT_API_KEY:-}" ]; then
+        export GPT_API_KEY="$DEEPSEEK_API_KEY"
+    fi
+    export GPT_BASE_URL="${GPT_BASE_URL:-$DEEPSEEK_BASE_URL}"
+    export GPT_MODEL="${GPT_MODEL:-$DEEPSEEK_MODEL}"
+
+    # Optional OpenRouter attribution headers.
+    export OPENROUTER_X_TITLE="${OPENROUTER_X_TITLE:-fubot}"
+    echo "[OK] OpenRouter DeepSeek-only mode ON (${DEEPSEEK_MODEL})"
+else
+    echo "[INFO] OpenRouter DeepSeek-only mode OFF (OPENROUTER_DEEPSEEK_ONLY=0)"
+fi
+
+# 6. Quick validation
+python3 -c "import config; print(f'[OK] Config loaded - {len(config.COINS)} coins')" || {
     echo "[ERROR] Config validation failed"
     exit 1
 }
 
-# 6. Run bot
+# 7. LLM preflight (skip with SKIP_LLM_PREFLIGHT=1)
+if [ "${SKIP_LLM_PREFLIGHT:-0}" != "1" ]; then
+    echo "[*] Running LLM preflight..."
+    python3 llm_preflight.py || {
+        echo "[ERROR] LLM preflight failed. Check API key/base/model in .env"
+        echo "[HINT] Set SKIP_LLM_PREFLIGHT=1 only if you intentionally bypass this check."
+        exit 1
+    }
+else
+    echo "[WARN] SKIP_LLM_PREFLIGHT=1 - skipping LLM connectivity check"
+fi
+
+# 8. Run bot
 echo ""
 echo "========================================="
 echo "  Starting FuBot..."
 echo "========================================="
 echo ""
 
-# Use nohup so bot survives SSH disconnect
-# Logs go to fubot.log + stdout
 exec python3 main.py
