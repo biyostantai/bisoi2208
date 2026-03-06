@@ -675,13 +675,14 @@ async def send_auto_trade_signal(bot, signal: dict):
 
     pos_info = signal.get("position_info", {})
 
+    analysis_title = "Score-only" if config.AI_SCORE_ONLY_MODE else "AI"
     text = (
         f"AUTO TRADE - ORDER SENT\n"
         f"{'-' * 28}\n\n"
         f"{signal['symbol']}\n"
         f"Direction: {direction_emoji}\n"
         f"Price: {signal['price']:,.6f}\n\n"
-        f"AI:\n"
+        f"{analysis_title}:\n"
         f"  L1: {ai.get('analyst_bias', 'N/A')} ({ai.get('analyst_strength', '?')})\n"
         f"  L2: Risk {ai.get('risk_score', '?')}/100 | Squeeze {ai.get('squeeze_risk', '?')}%\n"
         f"  L3: Grade {grade}\n\n"
@@ -835,7 +836,6 @@ def setup_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Telegram handlers set up")
-
 
 
 

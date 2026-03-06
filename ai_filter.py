@@ -103,6 +103,78 @@ PAIR_PLAYBOOKS = {
         "gpt_focus": "Rejection hoac breakout tai key level",
         "bonus_focus": "DeFi yield narrative, ATR cao",
     },
+    "LINK": {
+        "cluster": "LINK/ADA",
+        "style": "Trend Following",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Gia giu EMA21 M1 sau pullback ngan",
+        "gpt_focus": "Compression breakout va tiep dien xu huong",
+        "bonus_focus": "Large-cap beta, liquidity on dinh",
+    },
+    "ADA": {
+        "cluster": "LINK/ADA",
+        "style": "Trend Following",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Gia giu EMA21 M1 theo huong BTC",
+        "gpt_focus": "Follow-through sau breakout khoi box",
+        "bonus_focus": "Large-cap beta, spread mem, de scalp nhanh",
+    },
+    "XRP": {
+        "cluster": "XRP/NEAR",
+        "style": "Liquidity Sweep",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Sweep high/low ngan roi quay lai theo huong chinh",
+        "gpt_focus": "Liquidity grab xac nhan bang orderflow",
+        "bonus_focus": "Mega-cap beta, thanh khoan day, hop cho scalp ngan",
+    },
+    "NEAR": {
+        "cluster": "XRP/NEAR",
+        "style": "Trend Following",
+        "sl_pct": 0.50,
+        "tp_pct": 1.00,
+        "deepseek_focus": "Pullback EMA21 M1 va order block gan nhat",
+        "gpt_focus": "Continuation sau nhom alt beta bat toc",
+        "bonus_focus": "Vol tot hon ADA/XRP nhung van kha liquid",
+    },
+    "ARB": {
+        "cluster": "ARB/OP",
+        "style": "Trend Following",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Breakout khoi vung nen ngan va giu EMA21 M1",
+        "gpt_focus": "L2 beta follow BTC sau compression",
+        "bonus_focus": "Thanh khoan tot, hop scalp nhanh theo nhom L2",
+    },
+    "OP": {
+        "cluster": "ARB/OP",
+        "style": "Trend Following",
+        "sl_pct": 0.50,
+        "tp_pct": 1.00,
+        "deepseek_focus": "Retest EMA21 M1 va orderflow tiep dien",
+        "gpt_focus": "Momentum continuation sau breakout",
+        "bonus_focus": "L2 beta khoe, spread mem, follow BTC kha tot",
+    },
+    "DOT": {
+        "cluster": "DOT/LTC",
+        "style": "Large Cap Rotation",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Gia giu structure M1 sach, wick ngan",
+        "gpt_focus": "Rotation cung nhom large-cap khi BTC on dinh",
+        "bonus_focus": "Liquid on, de lay keo nhe va thoat nhanh",
+    },
+    "LTC": {
+        "cluster": "DOT/LTC",
+        "style": "Large Cap Rotation",
+        "sl_pct": 0.45,
+        "tp_pct": 0.90,
+        "deepseek_focus": "Candle clean va breakout volume nhe",
+        "gpt_focus": "Large-cap beta tiep dien theo BTC",
+        "bonus_focus": "Spread mem, ho tro scalp 2.5 USDT de hon",
+    },
 }
 
 
@@ -120,6 +192,16 @@ def _pair_profile(symbol: str) -> dict:
         "gpt_focus": "Momentum confirmation",
         "bonus_focus": "Macro + orderflow confluence",
     }
+
+
+def get_pair_profile(symbol: str) -> dict:
+    """Public helper for runtime ranking and cluster diversification."""
+    return _pair_profile(symbol)
+
+
+def get_pair_cluster(symbol: str) -> str:
+    profile = _pair_profile(symbol)
+    return str(profile.get("cluster", symbol.split("-")[0].upper()))
 
 
 def _pair_min_score(symbol: str) -> float:
@@ -163,6 +245,13 @@ def _build_pair_playbook_score(
     ob_block_bias = str(indicators.get("m5_order_block_bias", "unknown")).lower()
     ob_block_near = bool(indicators.get("m5_order_block_near", False))
     bb_pos = str(indicators.get("m1_bb_position", "mid")).lower()
+    bb_touch_upper = bool(indicators.get("m1_bb_touch_upper", False))
+    bb_touch_lower = bool(indicators.get("m1_bb_touch_lower", False))
+    bb_width_pct = _float_value(indicators.get("m1_bb_width_pct"), 0.0)
+    bb_width_ratio = _float_value(indicators.get("m1_bb_width_ratio"), 1.0)
+    bb_squeeze = bool(indicators.get("m1_bb_squeeze", False))
+    bb_expansion = bool(indicators.get("m1_bb_expansion", False))
+    regime_hint = str(indicators.get("m1_market_regime_hint", "unknown")).lower()
 
     # Candle trend data
     trend_5m = str(indicators.get("trend_5m", "unknown")).lower()
@@ -171,12 +260,52 @@ def _build_pair_playbook_score(
     cvd_bias = str(indicators.get("cvd_bias", "neutral")).lower()
     ob_bias = str(indicators.get("ob_bias", "neutral")).lower()
 
+    _bullish_set = ("bullish", "up", "long", "uptrend", "strong_bullish", "weak_bullish")
+    _bearish_set = ("bearish", "down", "short", "downtrend", "strong_bearish", "weak_bearish")
+    strong_trend_ctx = (
+        (trend_5m in _bullish_set and trend_15m in _bullish_set)
+        or (trend_5m in _bearish_set and trend_15m in _bearish_set)
+    )
+
+    squeeze_ratio_cfg = max(
+        0.2,
+        _float_value(getattr(config, "MARKET_REGIME_BB_SQUEEZE_RATIO", 0.85), 0.85),
+    )
+    expand_ratio_cfg = max(
+        squeeze_ratio_cfg + 0.05,
+        _float_value(getattr(config, "MARKET_REGIME_BB_EXPAND_RATIO", 1.20), 1.20),
+    )
+    breakout_vol_min = max(
+        5.0,
+        _float_value(getattr(config, "MARKET_REGIME_BREAKOUT_VOL_MIN", 25.0), 25.0),
+    )
+
+    if bb_squeeze or bb_width_ratio <= squeeze_ratio_cfg:
+        market_regime = "sideway"
+    elif (bb_expansion or bb_width_ratio >= expand_ratio_cfg) and strong_trend_ctx:
+        market_regime = "trend"
+    elif regime_hint in ("sideway", "trend", "mixed"):
+        market_regime = regime_hint
+    else:
+        market_regime = "mixed"
+
+    if market_regime == "sideway":
+        regime_confidence = int(
+            max(50, min(95, round(60 + max(0.0, squeeze_ratio_cfg - bb_width_ratio) * 90)))
+        )
+    elif market_regime == "trend":
+        regime_confidence = int(
+            max(50, min(95, round(55 + max(0.0, bb_width_ratio - expand_ratio_cfg) * 80)))
+        )
+    else:
+        regime_confidence = 55
+
+    bonus_notes = [f"MarketRegime={market_regime} (BB ratio={bb_width_ratio:.2f})"]
+
     # ═══ 0. KIỂM TRA XUNG ĐỘT HƯỚNG ĐI VS TREND ═══
     # Nếu direction đi ngược cả 2 timeframe → phạt nặng cả score
     warnings = []
     trend_conflict_penalty = 0.0
-    _bullish_set = ("bullish", "up", "long", "uptrend")
-    _bearish_set = ("bearish", "down", "short", "downtrend")
     if direction == "SHORT":
         if trend_5m in _bullish_set and trend_15m in _bullish_set:
             trend_conflict_penalty = 3.0  # Cả 2 TF bullish mà SHORT → phạt 3 điểm
@@ -267,7 +396,36 @@ def _build_pair_playbook_score(
             structure += 0.5
         if bb_pos == "upper":
             structure += 0.25
-    structure = min(4.0, structure)
+
+    if direction == "LONG":
+        breakout_raw = m1_breakout_up
+        breakout_trigger = m1_breakout_up and vol_surge >= breakout_vol_min
+        rejection_raw = rej == "bullish_rejection"
+        rejection_trigger = rejection_raw and (touch_sup or bb_pos == "lower" or bb_touch_lower)
+    else:
+        breakout_raw = m1_breakout_down
+        breakout_trigger = m1_breakout_down and vol_surge >= breakout_vol_min
+        rejection_raw = rej == "bearish_rejection"
+        rejection_trigger = rejection_raw and (touch_res or bb_pos == "upper" or bb_touch_upper)
+
+    regime_bonus = 0.0
+    regime_penalty = 0.0
+    if market_regime == "sideway":
+        if rejection_trigger:
+            regime_bonus += 0.8
+            bonus_notes.append("Regime sideway: ưu tiên rejection ở biên.")
+        if breakout_raw and not breakout_trigger:
+            regime_penalty += 0.7
+            warnings.append("Regime sideway: breakout thiếu volume, dễ false break.")
+    elif market_regime == "trend":
+        if breakout_trigger:
+            regime_bonus += 0.9
+            bonus_notes.append("Regime trend: ưu tiên breakout + volume surge.")
+        if rejection_raw and not breakout_raw:
+            regime_penalty += 0.6
+            warnings.append("Regime trend: giảm điểm setup rejection ngược sóng.")
+
+    structure = max(0.0, min(4.0, structure + regime_bonus - regime_penalty))
 
     # ═══ 2. ĐỘ AN TOÀN SL & RÂU NẾN (4 điểm) ═══
     # So sánh râu nến (wick) lớn nhất 10 nến M1 gần nhất vs SL target
@@ -341,12 +499,17 @@ def _build_pair_playbook_score(
             "sl_safety": round(sl_score, 1),
             "btc_strength": round(btc_score, 1),
             "trend_conflict_penalty": round(trend_conflict_penalty, 1),
+            "market_regime_bonus": round(regime_bonus - regime_penalty, 1),
         },
         "warnings": warnings,
-        "bonus_notes": [],
+        "bonus_notes": bonus_notes,
         "max_wick_pct_10": round(max_wick, 3),
         "volume_surge_pct": round(_float_value(indicators.get("m1_volume_surge_pct"), 0.0), 2),
         "bb_position": str(indicators.get("m1_bb_position", "mid")).lower(),
+        "bb_width_pct": round(bb_width_pct, 4),
+        "bb_width_ratio": round(bb_width_ratio, 3),
+        "market_regime": market_regime,
+        "market_regime_confidence": regime_confidence,
         "price_vs_ema21": price_vs_ema21,
     }
 
@@ -364,7 +527,12 @@ def _pair_playbook_prompt_text(symbol: str, playbook: dict) -> str:
         f"Score: {playbook.get('score_total', 0)}/10 "
         f"(structure={breakdown.get('candle_structure', 0)}/4, "
         f"sl_safety={breakdown.get('sl_safety', 0)}/4, "
-        f"btc={breakdown.get('btc_strength', 0)}/2)\n"
+        f"btc={breakdown.get('btc_strength', 0)}/2, "
+        f"regime_adj={breakdown.get('market_regime_bonus', 0)})\n"
+        f"MarketRegime={playbook.get('market_regime', 'mixed')} "
+        f"(conf={playbook.get('market_regime_confidence', 0)}%, "
+        f"bb_width={playbook.get('bb_width_pct', 0)}%, "
+        f"bb_ratio={playbook.get('bb_width_ratio', 1.0)})\n"
         f"Wick(M1)={playbook.get('max_wick_pct_10', 0)}%\n"
         f"Warnings: {warning_text}\n"
         f"HARD RULE: score < {min_score:.1f} = SKIP."
@@ -436,6 +604,9 @@ SCORING SYSTEM (10 points total):
 1. Candle structure & force M1/M5 (4 pts): Breakout, engulfing, rejection patterns
 2. SL safety & wick (4 pts): Max wick vs SL target
 3. BTC/market strength (2 pts): BTC trend alignment
+4. Regime rule:
+   - Sideway (BB squeeze) => prioritize rejection at band/zone
+   - Trend (BB expansion) => prioritize breakout + volume surge
 
 RULE: >= 7.5/10 = TRADE. < 7.5/10 = SKIP. No exceptions.
 
@@ -454,7 +625,8 @@ You MUST respond ONLY with valid JSON:
     "score_breakdown": {
         "candle_structure": 0-4,
         "sl_safety": 0-4,
-        "btc_strength": 0-2
+        "btc_strength": 0-2,
+        "market_regime_bonus": -1.0 to +1.0
     }
 }
 
@@ -1367,6 +1539,10 @@ Only trade Grade A/B setups with ALIGNED candles.
 {memory_text}
 
 Make your final decision. Return JSON only."""
+    required_score = float(getattr(config, "AI_SCORE_GATE", 7.0))
+    validator_system_prompt = PROMPT_LAYER3_VALIDATOR.replace(
+        "7.5", f"{required_score:.1f}"
+    )
 
     try:
         fanout = max(
@@ -1380,7 +1556,7 @@ Make your final decision. Return JSON only."""
 
         if fanout == 1:
             result = _call_gpt(
-                PROMPT_LAYER3_VALIDATOR,
+                validator_system_prompt,
                 prompt,
                 temperature=0.25,
                 timeout_sec=timeout_sec,
@@ -1401,7 +1577,7 @@ Make your final decision. Return JSON only."""
                 futures = [
                     pool.submit(
                         _call_gpt,
-                        PROMPT_LAYER3_VALIDATOR,
+                        validator_system_prompt,
                         prompt,
                         t,
                         timeout_sec,
@@ -1926,6 +2102,289 @@ def _build_skip_result(direction: str, analyst: dict, risk: dict,
     }
 
 
+def _score_only_local_analysis(
+    symbol: str,
+    direction: str,
+    indicators: dict,
+    playbook: dict,
+    required_score: float,
+) -> tuple[dict, dict, dict, str]:
+    """Pure-Python validator for score-only mode."""
+    breakdown = dict(playbook.get("score_breakdown", {}))
+    profile = dict(playbook.get("profile", {}))
+    pair_score = float(playbook.get("score_total", 0) or 0)
+    structure_score = float(breakdown.get("candle_structure", 0) or 0)
+    sl_score = float(breakdown.get("sl_safety", 0) or 0)
+    btc_score = float(breakdown.get("btc_strength", 0) or 0)
+    trend_penalty = float(breakdown.get("trend_conflict_penalty", 0) or 0)
+
+    cvd_bias = str(indicators.get("cvd_bias", "neutral")).lower()
+    ob_bias = str(indicators.get("ob_bias", "neutral")).lower()
+    price_vs_ema21 = str(
+        playbook.get("price_vs_ema21", indicators.get("m1_price_vs_ema21", "unknown"))
+    ).lower()
+    oi_signal = str(indicators.get("oi_signal", "normal")).lower()
+    funding_signal = str(indicators.get("funding_signal", "neutral")).lower()
+    candle_aligned = bool(indicators.get("candle_aligned", False))
+    volume_surge = _float_value(indicators.get("m1_volume_surge_pct"), 0.0)
+    market_regime = str(
+        playbook.get("market_regime", indicators.get("m1_market_regime_hint", "mixed"))
+    ).lower()
+    breakout_vol_min = max(
+        5.0,
+        float(getattr(config, "MARKET_REGIME_BREAKOUT_VOL_MIN", 25.0)),
+    )
+    require_regime_match = bool(getattr(config, "SCORE_ONLY_REQUIRE_REGIME_MATCH", True))
+
+    if direction == "LONG":
+        flow_confirm = cvd_bias == "bullish" and ob_bias == "bullish"
+        ema_confirm = price_vs_ema21 == "above"
+        trigger_confirm = bool(
+            indicators.get("m1_breakout_up")
+            or indicators.get("m1_bull_engulfing")
+            or indicators.get("m1_rejection_signal") == "bullish_rejection"
+        )
+        rejection_trigger = bool(
+            indicators.get("m1_rejection_signal") == "bullish_rejection"
+            and (
+                indicators.get("m5_touch_support")
+                or indicators.get("m1_bb_position") == "lower"
+                or indicators.get("m1_bb_touch_lower")
+            )
+        )
+        breakout_trigger = bool(
+            indicators.get("m1_breakout_up") and volume_surge >= breakout_vol_min
+        )
+        crowded_signal = funding_signal in ("high_long", "extreme_long")
+    else:
+        flow_confirm = cvd_bias == "bearish" and ob_bias == "bearish"
+        ema_confirm = price_vs_ema21 == "below"
+        trigger_confirm = bool(
+            indicators.get("m1_breakout_down")
+            or indicators.get("m1_bear_engulfing")
+            or indicators.get("m1_rejection_signal") == "bearish_rejection"
+        )
+        rejection_trigger = bool(
+            indicators.get("m1_rejection_signal") == "bearish_rejection"
+            and (
+                indicators.get("m5_touch_resistance")
+                or indicators.get("m1_bb_position") == "upper"
+                or indicators.get("m1_bb_touch_upper")
+            )
+        )
+        breakout_trigger = bool(
+            indicators.get("m1_breakout_down") and volume_surge >= breakout_vol_min
+        )
+        crowded_signal = funding_signal in ("high_short", "extreme_short")
+
+    entry_trigger_ok = candle_aligned or trigger_confirm or volume_surge >= 25
+    if market_regime == "sideway":
+        regime_trigger_ok = rejection_trigger
+    elif market_regime == "trend":
+        regime_trigger_ok = breakout_trigger
+    else:
+        regime_trigger_ok = rejection_trigger or breakout_trigger or trigger_confirm
+    if require_regime_match and market_regime in ("sideway", "trend"):
+        entry_trigger_ok = entry_trigger_ok and regime_trigger_ok
+
+    min_structure_cfg = float(getattr(config, "SCORE_ONLY_MIN_STRUCTURE", 2.8))
+    min_sl_safety_cfg = float(getattr(config, "SCORE_ONLY_MIN_SL_SAFETY", 2.5))
+    max_trend_conflict_cfg = float(getattr(config, "SCORE_ONLY_MAX_TREND_CONFLICT", 1.5))
+    soft_flow_min_score = float(getattr(config, "SCORE_ONLY_FLOW_SOFT_MIN_SCORE", 0.0))
+    soft_flow_allowed = (
+        (not flow_confirm)
+        and soft_flow_min_score > 0
+        and pair_score >= soft_flow_min_score
+        and sl_score >= min_sl_safety_cfg
+        and entry_trigger_ok
+        and trend_penalty <= max_trend_conflict_cfg
+    )
+
+    hard_fail_reasons = []
+    if structure_score < min_structure_cfg:
+        hard_fail_reasons.append(
+            f"structure {structure_score:.1f} < {min_structure_cfg:.1f}"
+        )
+    if sl_score < min_sl_safety_cfg:
+        hard_fail_reasons.append(
+            f"sl_safety {sl_score:.1f} < {min_sl_safety_cfg:.1f}"
+        )
+    if trend_penalty > max_trend_conflict_cfg:
+        hard_fail_reasons.append(
+            f"trend_conflict {trend_penalty:.1f} > {max_trend_conflict_cfg:.1f}"
+        )
+    if (
+        bool(getattr(config, "SCORE_ONLY_REQUIRE_FLOW_CONFIRM", True))
+        and not flow_confirm
+        and not soft_flow_allowed
+    ):
+        hard_fail_reasons.append("orderflow khong dong thuan (CVD + orderbook)")
+    if bool(getattr(config, "SCORE_ONLY_REQUIRE_EMA_CONFIRM", False)) and not ema_confirm:
+        hard_fail_reasons.append("gia chua dong thuan EMA21 M1")
+    if require_regime_match and market_regime in ("sideway", "trend") and not regime_trigger_ok:
+        if market_regime == "sideway":
+            hard_fail_reasons.append("regime sideway: can rejection tai bien BB/SR")
+        else:
+            hard_fail_reasons.append(
+                f"regime trend: can breakout + volume >= {breakout_vol_min:.0f}%"
+            )
+
+    risk_factors = list(playbook.get("warnings", []))
+    if market_regime == "sideway":
+        risk_factors.append("Market regime: sideway (ưu tiên rejection)")
+    elif market_regime == "trend":
+        risk_factors.append("Market regime: trend (ưu tiên breakout + volume)")
+    if not flow_confirm:
+        if soft_flow_allowed:
+            risk_factors.append("Orderflow lech nhe, cho phep soft-override")
+        else:
+            risk_factors.append("Orderflow khong dong thuan huong lenh")
+    if not ema_confirm:
+        risk_factors.append("Gia chua o dung phia EMA21 M1")
+    if not entry_trigger_ok:
+        risk_factors.append("Thieu trigger micro ro rang (breakout/engulfing/volume)")
+    if require_regime_match and market_regime in ("sideway", "trend") and not regime_trigger_ok:
+        risk_factors.append("Trigger khong match voi market regime hien tai")
+    if oi_signal == "warning":
+        risk_factors.append("OI dang tang nhanh, de gap squeeze")
+    elif oi_signal == "danger":
+        risk_factors.append("OI tang qua nhanh, squeeze risk cao")
+    if crowded_signal:
+        risk_factors.append("Funding dang crowded cung huong lenh")
+
+    risk_score = 18
+    if not flow_confirm:
+        risk_score += 10 if soft_flow_allowed else 18
+    if not ema_confirm:
+        risk_score += 8
+    if not entry_trigger_ok:
+        risk_score += 10
+    if require_regime_match and market_regime in ("sideway", "trend") and not regime_trigger_ok:
+        risk_score += 10
+    if oi_signal == "warning":
+        risk_score += 8
+    elif oi_signal == "danger":
+        risk_score += 18
+    if crowded_signal:
+        risk_score += 12
+    risk_score += int(round(trend_penalty * 12))
+    if sl_score < min_sl_safety_cfg:
+        risk_score += 18
+    risk_score = max(0, min(100, risk_score))
+
+    if risk_score >= 65:
+        risk_level = "EXTREME"
+    elif risk_score >= 50:
+        risk_level = "HIGH"
+    elif risk_score >= 30:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    if not hard_fail_reasons and risk_score >= 60:
+        hard_fail_reasons.append(f"risk_score {risk_score}/100 qua cao cho score-only")
+    if not hard_fail_reasons and soft_flow_allowed:
+        soft_flow_max_risk = int(getattr(config, "SCORE_ONLY_FLOW_SOFT_MAX_RISK", 55))
+        if risk_score > soft_flow_max_risk:
+            hard_fail_reasons.append(
+                f"soft-flow risk_score {risk_score}/100 > {soft_flow_max_risk}"
+            )
+
+    confidence = int(
+        max(
+            45,
+            min(
+                95,
+                round(
+                    pair_score * 10
+                    + (5 if flow_confirm else 0)
+                    + (4 if entry_trigger_ok else -4)
+                    + (2 if ema_confirm else -3)
+                    - trend_penalty * 8
+                ),
+            ),
+        )
+    )
+    win_probability = int(
+        max(
+            40,
+            min(
+                92,
+                round(confidence - max(0, risk_score - 25) * 0.45),
+            ),
+        )
+    )
+
+    if not hard_fail_reasons and structure_score >= 3.5 and sl_score >= 3.0 and flow_confirm and entry_trigger_ok:
+        entry_quality = "A"
+    elif not hard_fail_reasons and structure_score >= 3.0 and sl_score >= 2.5:
+        entry_quality = "B"
+    elif not hard_fail_reasons:
+        entry_quality = "C"
+    else:
+        entry_quality = "D"
+
+    direction_prob = confidence
+    opposite_prob = max(0, 100 - direction_prob)
+    analyst = {
+        "bias": direction if flow_confirm or entry_trigger_ok else "NEUTRAL",
+        "prob_long": direction_prob if direction == "LONG" else opposite_prob,
+        "prob_short": direction_prob if direction == "SHORT" else opposite_prob,
+        "trend_strength": "strong" if flow_confirm and entry_trigger_ok else "medium" if flow_confirm or entry_trigger_ok else "weak",
+        "key_observation": (
+            f"score={pair_score:.1f}/10 | structure={structure_score:.1f}/4 | "
+            f"sl={sl_score:.1f}/4 | btc={btc_score:.1f}/2"
+        ),
+    }
+    risk = {
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "squeeze_risk": 65 if oi_signal == "danger" else 40 if oi_signal == "warning" else 20,
+        "safe_to_trade": not hard_fail_reasons and risk_score < 60,
+        "risk_factors": risk_factors,
+        "recommendation": "Score-only local gate",
+    }
+
+    reasoning_bits = [
+        f"Score gate pass: {pair_score:.1f}/10 >= {required_score:.1f}/10",
+        f"flow={'soft' if soft_flow_allowed else ('ok' if flow_confirm else 'weak')}",
+        f"ema={'ok' if ema_confirm else 'weak'}",
+        f"trigger={'ok' if entry_trigger_ok else 'weak'}",
+        f"regime={market_regime}:{'ok' if regime_trigger_ok else 'weak'}",
+        f"risk={risk_score}/100",
+    ]
+    if soft_flow_allowed:
+        reasoning_bits.append(f"flow_soft_override(score>={soft_flow_min_score:.1f})")
+    if hard_fail_reasons:
+        reasoning_bits.append("hard_fail=" + "; ".join(hard_fail_reasons))
+
+    validator = {
+        "decision": "SKIP" if hard_fail_reasons else "TRADE",
+        "confidence": confidence,
+        "direction": direction,
+        "win_probability": win_probability,
+        "risk_level": risk_level,
+        "reasoning": " | ".join(reasoning_bits),
+        "entry_quality": entry_quality,
+        "lessons_applied": "score-only local hard filter",
+        "pair_profile": f"{profile.get('cluster', symbol.split('-')[0])} | {profile.get('style', 'General')}",
+        "playbook_score": round(pair_score, 1),
+        "score_breakdown": breakdown,
+        "playbook_warnings": playbook.get("warnings", []),
+        "playbook_bonus_notes": playbook.get("bonus_notes", []),
+        "market_regime": market_regime,
+        "market_regime_trigger_ok": regime_trigger_ok,
+    }
+
+    reject_reason = ""
+    if hard_fail_reasons:
+        reject_reason = (
+            f"Score-only hard filter reject: {'; '.join(hard_fail_reasons)}"
+        )
+
+    return analyst, risk, validator, reject_reason
+
+
 def _build_score_trade_result(
     direction: str,
     analyst: dict,
@@ -1966,6 +2425,8 @@ def _build_score_trade_result(
         "score_breakdown": validator.get("score_breakdown", {}),
         "playbook_warnings": validator.get("playbook_warnings", []),
         "playbook_bonus_notes": validator.get("playbook_bonus_notes", []),
+        "market_regime": validator.get("market_regime", "mixed"),
+        "market_regime_trigger_ok": validator.get("market_regime_trigger_ok", False),
         "analyst_bias": analyst.get("bias", "NEUTRAL"),
         "analyst_prob_long": analyst.get("prob_long", 50),
         "analyst_prob_short": analyst.get("prob_short", 50),
@@ -2009,7 +2470,7 @@ def _build_score_trade_result(
         "total_ai_time": total_time,
         "ai_budget_sec": round(ai_budget_sec, 2),
         "ai_budget_remaining_sec": round(max(0.0, ai_budget_remaining_sec), 2),
-        "layers_called": 3,
+        "layers_called": 0,
         "step3_mode": "score_only",
         "score_gate": float(score_gate),
     }
@@ -2031,15 +2492,21 @@ def analyze_trade(
     FAST EXIT: nếu L3 win < threshold → skip ngay (~20-25s thay vì 50s)
     PARALLEL Step 3: L4 + L5 + L6 CÙNG LÚC (3 workers)
     """
+    score_only_mode = bool(getattr(config, "AI_SCORE_ONLY_MODE", False))
     ai_profile_label = "FAST3L" if config.AI_FAST_3L_MODE else "6-Layer"
-    logger.info(f"🧠 AI {ai_profile_label} Analysis: {symbol} {direction}")
+    if score_only_mode:
+        logger.info(f"🧮 SCORE-ONLY Analysis: {symbol} {direction}")
+    else:
+        logger.info(f"🧠 AI {ai_profile_label} Analysis: {symbol} {direction}")
     deepseek_available = bool(config.DEEPSEEK_API_KEY and config.DEEPSEEK_BASE_URL)
     deepseek_assist_mode = bool(
         config.AI_GPT_ONLY_MODE
         and config.AI_DEEPSEEK_ASSIST_ENABLED
         and deepseek_available
     )
-    if config.AI_FAST_3L_MODE:
+    if score_only_mode:
+        logger.info("  📡 Local stack: playbook + orderflow + microstructure + BTC filter")
+    elif config.AI_FAST_3L_MODE:
         logger.info("  📡 FAST3L stack: GPT L1+L2 + DeepSeek L4")
     elif config.AI_GPT_ONLY_MODE:
         if deepseek_assist_mode:
@@ -2048,11 +2515,12 @@ def analyze_trade(
             logger.info("  📡 GPT aggressive mode: L1+L2+L3+L5 (DeepSeek skipped)")
     else:
         logger.info("  📡 GPT: L1+L2+L3+L5 | 🔷 DeepSeek: L4+L6 (anti-echo)")
-    if config.AI_FAST_3L_MODE:
+    if not score_only_mode and config.AI_FAST_3L_MODE:
         logger.info("  ⚙️ FAST3L: 2 GPT (L1+L2) + 1 DeepSeek (L4 referee)")
     total_start = time.time()
     budget_sec = float(time_budget_sec or config.AI_TIME_BUDGET_SEC)
-    budget_deadline = total_start + max(8.0, budget_sec)
+    min_budget_floor = max(2.0, float(getattr(config, "AI_MIN_BUDGET_FLOOR_SEC", 8.0)))
+    budget_deadline = total_start + max(min_budget_floor, budget_sec)
     analysis_min_win = int(
         min(
             int(getattr(config, "AUTO_TRADE_MIN_WIN", 65)),
@@ -2089,8 +2557,11 @@ def analyze_trade(
         f"(structure={pre_breakdown.get('candle_structure', 0)}/4, "
         f"sl_safety={pre_breakdown.get('sl_safety', 0)}/4, "
         f"btc={pre_breakdown.get('btc_strength', 0)}/2, "
-        f"conflict=-{pre_breakdown.get('trend_conflict_penalty', 0)}) "
-        f"wick={pre_playbook.get('max_wick_pct_10', 0)}%"
+        f"conflict=-{pre_breakdown.get('trend_conflict_penalty', 0)}, "
+        f"regime_adj={pre_breakdown.get('market_regime_bonus', 0)}) "
+        f"wick={pre_playbook.get('max_wick_pct_10', 0)}% | "
+        f"regime={pre_playbook.get('market_regime', 'mixed')} "
+        f"(bb_ratio={pre_playbook.get('bb_width_ratio', 1.0)})"
     )
 
     # ══ FAST EXIT #0: Score gate (tức thì, không tốn API) ══
@@ -2123,24 +2594,27 @@ def analyze_trade(
     # ══ SCORE-ONLY MODE: bypass ALL AI calls ══
     if bool(getattr(config, "AI_SCORE_ONLY_MODE", False)):
         total_time = round(time.time() - total_start, 2)
+        analyst, risk, validator, reject_reason = _score_only_local_analysis(
+            symbol,
+            direction,
+            indicators,
+            pre_playbook,
+            required_score,
+        )
+        if reject_reason:
+            logger.info(f"  ⚡ SCORE-ONLY HARD EXIT: {reject_reason} ({total_time}s)")
+            return _build_skip_result(
+                direction,
+                analyst,
+                risk,
+                total_time,
+                reason=reject_reason,
+                validator=validator,
+            )
         logger.info(
             f"  ✅ SCORE-ONLY PASS: playbook_score={pre_score:.1f}/10 >= {required_score:.1f}/10 "
             f"→ TRADE ({total_time}s, score-only, 0 API calls)"
         )
-        # Build validator with pre-score data
-        validator = {}
-        validator["playbook_score"] = round(float(pre_score), 1)
-        validator["score_breakdown"] = dict(pre_breakdown)
-        validator["pair_profile"] = (
-            f"{pre_profile.get('cluster', symbol.split('-')[0])} | {pre_profile.get('style', 'General')}"
-        )
-        validator["playbook_warnings"] = pre_playbook.get("warnings", [])
-        validator["playbook_bonus_notes"] = pre_playbook.get("bonus_notes", [])
-        # Fake analyst/risk for _build_score_trade_result
-        analyst = {"bias": direction.upper(), "prob_long": 60, "prob_short": 40,
-                    "trend_strength": "medium", "key_observation": "score-only mode"}
-        risk = {"risk_level": "LOW", "risk_score": 30, "squeeze_risk": 20,
-                "safe_to_trade": True, "risk_factors": [], "recommendation": "score-only"}
         return _build_score_trade_result(
             direction=direction,
             analyst=analyst,
@@ -2149,7 +2623,7 @@ def analyze_trade(
             total_time=total_time,
             score_gate=required_score,
             ai_budget_sec=budget_sec,
-            ai_budget_remaining_sec=budget_sec,
+            ai_budget_remaining_sec=max(0.0, budget_deadline - time.time()),
         )
 
     # ══ STEP 1: L1 + L2 SONG SONG ══
@@ -2192,9 +2666,13 @@ def analyze_trade(
     )
     l1_is_fallback = analyst.get("fallback_used", False)
     if not bias_matches and l1_strength == "weak":
-        # Nếu L1 timeout (fallback) + pre-score >= 7.5 → bỏ qua L1 check, tiếp tục L3
-        if l1_is_fallback and pre_score >= 7.5:
-            logger.info(f"  ⚠️ L1 fallback (timeout) nhưng pre-score={pre_score:.1f}≥7.5 → bypass L1 check, tiếp tục L3")
+        fallback_bypass_score = float(getattr(config, "AI_L1_FALLBACK_BYPASS_SCORE", 7.5))
+        # Nếu L1 timeout (fallback) + pre-score đủ cao → bỏ qua L1 check, tiếp tục L3
+        if l1_is_fallback and pre_score >= fallback_bypass_score:
+            logger.info(
+                f"  ⚠️ L1 fallback (timeout) nhưng pre-score={pre_score:.1f}≥{fallback_bypass_score:.1f} "
+                "→ bypass L1 check, tiếp tục L3"
+            )
         else:
             total_time = round(time.time() - total_start, 2)
             logger.info(f"  ⚡ FAST EXIT: L1 bias={l1_bias} ({l1_strength}) "
@@ -2342,11 +2820,12 @@ def analyze_trade(
         )
 
     if l3_win < analysis_min_win:
-        # Nếu pre-score cao (≥ 7.5), vẫn cho qua L4/L5/L6 để verify sâu
+        # Nếu pre-score cao (>= required score), vẫn cho qua L4/L5/L6 để verify sâu
         # thay vì block ở L3 — L4 Devil's Advocate sẽ bắt trap
-        if pair_score >= 7.5:
+        if pair_score >= required_score:
             logger.info(
-                f"  ⚠️ L3 win={l3_win}% < {analysis_min_win}% nhưng pre-score={pair_score:.1f}≥7.5"
+                f"  ⚠️ L3 win={l3_win}% < {analysis_min_win}% nhưng pre-score={pair_score:.1f}"
+                f">={required_score:.1f}"
                 f" → tiếp tục L4/L5/L6 verify"
             )
         else:

@@ -231,6 +231,10 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
             "m1_max_wick_pct_10": 0.0,
             "m1_last_upper_wick_pct": 0.0,
             "m1_last_lower_wick_pct": 0.0,
+            "m1_bull_streak": 0,
+            "m1_bear_streak": 0,
+            "m1_long_wick_bullish": False,
+            "m1_long_wick_bearish": False,
             "m1_bull_engulfing": False,
             "m1_bear_engulfing": False,
             "m1_rejection_signal": "none",
@@ -238,8 +242,20 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
             "m1_bb_position": "mid",
             "m1_bb_touch_upper": False,
             "m1_bb_touch_lower": False,
+            "m1_bb_width_pct": 0.0,
+            "m1_bb_width_ratio": 1.0,
+            "m1_bb_squeeze": False,
+            "m1_bb_expansion": False,
+            "m1_market_regime_hint": "unknown",
             "m5_touch_resistance": False,
             "m5_touch_support": False,
+            "m5_last_upper_wick_pct": 0.0,
+            "m5_last_lower_wick_pct": 0.0,
+            "m5_last_body_pct": 0.0,
+            "m5_last_range_pct": 0.0,
+            "m5_pinbar_bullish": False,
+            "m5_pinbar_bearish": False,
+            "m5_wave_ready": False,
             "m5_order_block_bias": "unknown",
             "m5_order_block_near": False,
         }
@@ -315,6 +331,24 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
     out["m1_last_upper_wick_pct"] = round(last_up, 3)
     out["m1_last_lower_wick_pct"] = round(last_low, 3)
 
+    bull_streak = 0
+    bear_streak = 0
+    for c in reversed(m1):
+        if c["close"] > c["open"] * 1.0001:
+            if bear_streak == 0:
+                bull_streak += 1
+            else:
+                break
+        elif c["close"] < c["open"] * 0.9999:
+            if bull_streak == 0:
+                bear_streak += 1
+            else:
+                break
+        else:
+            break
+    out["m1_bull_streak"] = int(bull_streak)
+    out["m1_bear_streak"] = int(bear_streak)
+
     out["m1_bull_engulfing"] = bool(
         last["close"] > last["open"]
         and prev["close"] < prev["open"]
@@ -334,6 +368,8 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
         out["m1_rejection_signal"] = "bearish_rejection"
     else:
         out["m1_rejection_signal"] = "none"
+    out["m1_long_wick_bullish"] = out["m1_rejection_signal"] == "bullish_rejection"
+    out["m1_long_wick_bearish"] = out["m1_rejection_signal"] == "bearish_rejection"
 
     if len(vols) >= 2:
         base_vol = vols[-61:-1] if len(vols) > 60 else vols[:-1]
@@ -365,6 +401,64 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
             out["m1_bb_position"] = "mid"
         out["m1_bb_touch_upper"] = bool(last_close >= upper * 0.998) if std20 > 0 else False
         out["m1_bb_touch_lower"] = bool(last_close <= lower * 1.002) if std20 > 0 else False
+        width_pct = ((upper - lower) / ma20 * 100.0) if ma20 > 0 else 0.0
+        out["m1_bb_width_pct"] = round(width_pct, 4)
+
+        # BB width regime hint: compare current width with rolling historical width.
+        width_series = []
+        if len(closes) >= 24:
+            for idx in range(19, len(closes)):
+                win = closes[idx - 19:idx + 1]
+                ma = sum(win) / len(win)
+                if ma <= 0:
+                    continue
+                var = sum((c - ma) ** 2 for c in win) / len(win)
+                std = var ** 0.5
+                width_series.append((4.0 * std / ma) * 100.0)
+        if width_series:
+            cur_width = width_series[-1]
+            hist = width_series[-16:-1] if len(width_series) > 15 else width_series[:-1]
+            if not hist:
+                hist = [cur_width]
+            hist_avg = sum(hist) / len(hist) if hist else cur_width
+            width_ratio = cur_width / hist_avg if hist_avg > 0 else 1.0
+        else:
+            width_ratio = 1.0
+
+        out["m1_bb_width_ratio"] = round(width_ratio, 3)
+        out["m1_bb_squeeze"] = bool(width_ratio <= 0.85)
+        out["m1_bb_expansion"] = bool(width_ratio >= 1.20)
+        if out["m1_bb_squeeze"]:
+            out["m1_market_regime_hint"] = "sideway"
+        elif out["m1_bb_expansion"]:
+            out["m1_market_regime_hint"] = "trend"
+        else:
+            out["m1_market_regime_hint"] = "mixed"
+
+    if m5:
+        m5_last = m5[-1]
+        m5_last_up, m5_last_low = _wick_parts(m5_last)
+        out["m5_last_upper_wick_pct"] = round(m5_last_up, 3)
+        out["m5_last_lower_wick_pct"] = round(m5_last_low, 3)
+        px = max(m5_last["close"], 1e-9)
+        body_pct = abs(m5_last["close"] - m5_last["open"]) / px * 100
+        range_pct = max(0.0, m5_last["high"] - m5_last["low"]) / px * 100
+        out["m5_last_body_pct"] = round(body_pct, 3)
+        out["m5_last_range_pct"] = round(range_pct, 3)
+        wick_body_ratio_low = m5_last_low / max(1e-9, body_pct)
+        wick_body_ratio_up = m5_last_up / max(1e-9, body_pct)
+        body_ratio = body_pct / max(1e-9, range_pct)
+        out["m5_pinbar_bullish"] = bool(
+            wick_body_ratio_low >= 1.8
+            and m5_last_low >= m5_last_up * 1.2
+            and body_ratio <= 0.35
+        )
+        out["m5_pinbar_bearish"] = bool(
+            wick_body_ratio_up >= 1.8
+            and m5_last_up >= m5_last_low * 1.2
+            and body_ratio <= 0.35
+        )
+        out["m5_wave_ready"] = bool(max(m5_last_up, m5_last_low) >= 0.10)
 
     if len(m5) >= 6:
         m5_last = m5[-1]
@@ -387,6 +481,124 @@ def analyze_micro_setup(candles_1m: list, candles_5m: list) -> dict:
             now = m5_last["close"]
             out["m5_order_block_near"] = bool((low * 0.998) <= now <= (high * 1.002))
 
+    return out
+
+
+def analyze_sr_levels(
+    candles_15m: list,
+    lookback: int = 24,
+    near_threshold_pct: float = 0.35,
+    break_threshold_pct: float = 0.08,
+) -> dict:
+    """
+    Build simple support/resistance context from 15m candles.
+
+    Returns:
+    {
+      "m15_support": float,
+      "m15_resistance": float,
+      "m15_price": float,
+      "m15_dist_to_support_pct": float,
+      "m15_dist_to_resistance_pct": float,
+      "m15_near_support": bool,
+      "m15_near_resistance": bool,
+      "m15_breakdown_support": bool,
+      "m15_breakout_resistance": bool,
+      "m15_sr_bias": str
+    }
+    """
+
+    def _default() -> dict:
+        return {
+            "m15_support": 0.0,
+            "m15_resistance": 0.0,
+            "m15_price": 0.0,
+            "m15_dist_to_support_pct": 999.0,
+            "m15_dist_to_resistance_pct": 999.0,
+            "m15_near_support": False,
+            "m15_near_resistance": False,
+            "m15_breakdown_support": False,
+            "m15_breakout_resistance": False,
+            "m15_sr_bias": "unknown",
+        }
+
+    out = _default()
+
+    def _safe_float(value, fallback=0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(fallback)
+
+    def _parse_candle(raw: list) -> dict | None:
+        if not raw or len(raw) < 6:
+            return None
+        o = _safe_float(raw[1])
+        h = _safe_float(raw[2])
+        l = _safe_float(raw[3])
+        c = _safe_float(raw[4])
+        if c <= 0 or h <= 0 or l <= 0:
+            return None
+        return {"open": o, "high": h, "low": l, "close": c}
+
+    m15 = [_parse_candle(c) for c in reversed(candles_15m or [])]
+    m15 = [c for c in m15 if c is not None]
+    if len(m15) < 6:
+        return out
+
+    # Prefer closed candle to reduce repaint noise
+    ref_idx = -2 if len(m15) >= 2 else -1
+    ref = m15[ref_idx]
+    if ref["close"] <= 0:
+        return out
+
+    history_end = ref_idx if ref_idx != -1 else len(m15) - 1
+    start = max(0, history_end - max(6, int(lookback)))
+    history = m15[start:history_end]
+    if len(history) < 4:
+        history = m15[:-1]
+    if len(history) < 4:
+        return out
+
+    support = min(c["low"] for c in history)
+    resistance = max(c["high"] for c in history)
+    price = ref["close"]
+
+    dist_support = max(0.0, (price - support) / max(price, 1e-9) * 100.0)
+    dist_resistance = max(0.0, (resistance - price) / max(price, 1e-9) * 100.0)
+    near_threshold = max(0.05, float(near_threshold_pct))
+    break_threshold = max(0.01, float(break_threshold_pct))
+
+    near_support = dist_support <= near_threshold
+    near_resistance = dist_resistance <= near_threshold
+    breakdown_support = price < support * (1 - break_threshold / 100.0)
+    breakout_resistance = price > resistance * (1 + break_threshold / 100.0)
+
+    if breakdown_support:
+        sr_bias = "breakdown"
+    elif breakout_resistance:
+        sr_bias = "breakout"
+    elif near_support and not near_resistance:
+        sr_bias = "support"
+    elif near_resistance and not near_support:
+        sr_bias = "resistance"
+    else:
+        sr_bias = "mid"
+
+    out.update(
+        {
+            "m15_support": round(support, 8),
+            "m15_resistance": round(resistance, 8),
+            "m15_price": round(price, 8),
+            "m15_dist_to_support_pct": round(dist_support, 4),
+            "m15_dist_to_resistance_pct": round(dist_resistance, 4),
+            "m15_near_support": bool(near_support),
+            "m15_near_resistance": bool(near_resistance),
+            "m15_breakdown_support": bool(breakdown_support),
+            "m15_breakout_resistance": bool(breakout_resistance),
+            "m15_sr_bias": sr_bias,
+        }
+    )
     return out
 
 
@@ -459,7 +671,7 @@ def generate_signal(cvd_data: dict, oi_data: dict, ob_data: dict,
     long_score = 0
     short_score = 0
 
-    # 0. Candle timeframe filter (5m + 15m)
+    # 0. Candle timeframe filter (5m + 15m) + micro EMA hint if available
     if candle_data is not None:
         overall = candle_data.get("overall", "unknown")
         if overall == "mixed":

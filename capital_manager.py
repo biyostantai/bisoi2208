@@ -113,6 +113,12 @@ class CapitalManager:
         pass
 
     # ── kiểm tra ────────────────────────────────────────────
+    def _daily_stop_loss_hit(self) -> tuple[bool, float]:
+        threshold = float(getattr(config, "DAILY_STOP_LOSS_USDT", 0.0))
+        if threshold >= 0:
+            return False, threshold
+        return float(self.total_pnl) <= threshold, threshold
+
     def can_trade(self) -> tuple[bool, str]:
         """
         Kiểm tra có được phép trade tiếp không.
@@ -132,6 +138,13 @@ class CapitalManager:
             self.last_trade_time = 0.0
             self.last_trade_was_loss = False
             self._save()
+
+        hit_daily_stop, daily_threshold = self._daily_stop_loss_hit()
+        if hit_daily_stop:
+            return (
+                False,
+                f"Daily stop-loss hit: PnL {self.total_pnl:+.4f} <= {daily_threshold:+.4f} USDT",
+            )
 
         # Chan trade khi vuot nguong thua
         if config.MAX_LOSSES_PER_DAY > 0 and self.losses >= config.MAX_LOSSES_PER_DAY:
@@ -166,7 +179,8 @@ class CapitalManager:
 
     # ── ghi nhận kết quả ────────────────────────────────────
     def record_trade(self, symbol: str, direction: str, entry: float,
-                     exit_price: float, pnl: float, pnl_pct: float):
+                     exit_price: float, pnl: float, pnl_pct: float,
+                     extra: dict | None = None):
         """Ghi nhận kết quả 1 trade."""
         trade = {
             "time": datetime.now().isoformat(),
@@ -177,6 +191,11 @@ class CapitalManager:
             "pnl": round(pnl, 4),
             "pnl_pct": round(pnl_pct, 2),
         }
+        if extra:
+            for key, value in extra.items():
+                if value is None:
+                    continue
+                trade[key] = value
         self.trades.append(trade)
 
         if pnl >= 0:

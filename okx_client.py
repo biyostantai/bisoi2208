@@ -15,8 +15,11 @@ import base64
 import json
 import math
 import time
+import os
 from datetime import datetime, timezone
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import config
 
 
@@ -30,7 +33,32 @@ class OKXClient:
         self.base_url = config.OKX_BASE_URL
         self.demo = config.OKX_DEMO
         self.session = requests.Session()
+        self._configure_http_session()
         self._ensure_net_mode()
+
+    def _configure_http_session(self):
+        """
+        Tune HTTP pool for parallel scan (30-40+ coins).
+        Retry only GET requests to avoid duplicate trade orders on POST.
+        """
+        pool_connections = int(os.getenv("OKX_HTTP_POOL_CONNECTIONS", "100"))
+        pool_maxsize = int(os.getenv("OKX_HTTP_POOL_MAXSIZE", "100"))
+        retry = Retry(
+            total=2,
+            connect=2,
+            read=2,
+            backoff_factor=0.1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
+            max_retries=retry,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def _ensure_net_mode(self):
         """
@@ -91,7 +119,12 @@ class OKXClient:
                 path = path + "?" + query
                 url = self.base_url + path
 
-        headers = self._headers("GET", path)
+        # Public market/public endpoints không cần auth.
+        # Tránh dùng API-key quota cho data scan tần suất cao.
+        if path.startswith("/api/v5/market/") or path.startswith("/api/v5/public/"):
+            headers = {"Content-Type": "application/json"}
+        else:
+            headers = self._headers("GET", path)
         resp = self.session.get(url, headers=headers, timeout=15)
         return resp.json()
 
@@ -106,10 +139,21 @@ class OKXClient:
     # â”€â”€ market data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def get_ticker(self, inst_id: str) -> dict:
         """Láº¥y ticker (giĂ¡ hiá»‡n táº¡i)."""
-        result = self._get("/api/v5/market/ticker", {"instId": inst_id})
-        data = result.get("data", [])
-        if data:
-            return data[0]
+        for attempt in range(3):
+            try:
+                result = self._get("/api/v5/market/ticker", {"instId": inst_id})
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                return {}
+
+            data = result.get("data", [])
+            if data:
+                return data[0]
+
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
         return {}
 
     def get_orderbook(self, inst_id: str, depth: int = 20) -> dict:
@@ -556,7 +600,21 @@ class OKXClient:
         oi = self.get_open_interest(inst_id)
         candles_1m = self.get_candles(inst_id, bar="1m", limit=120)
         candles_5m = self.get_candles(inst_id, bar="5m", limit=50)
-        candles_15m = self.get_candles(inst_id, bar="15m", limit=50)
+        m15_limit = 50
+        if bool(getattr(config, "ATR_BRAKE_ENABLED", False)):
+            atr_need = (
+                int(getattr(config, "ATR_BRAKE_PERIOD", 14))
+                + int(getattr(config, "ATR_BRAKE_LOOKBACK_BARS", 96))
+                + 5
+            )
+            m15_limit = max(m15_limit, atr_need)
+        if bool(getattr(config, "HARD_GATE_EMA200_ENABLED", False)):
+            m15_limit = max(m15_limit, 220)
+        m15_limit = min(300, m15_limit)
+        candles_15m = self.get_candles(inst_id, bar="15m", limit=m15_limit)
+        candles_1h = []
+        if bool(getattr(config, "HARD_GATE_EMA200_ENABLED", False)):
+            candles_1h = self.get_candles(inst_id, bar="1H", limit=220)
 
         # Parse trades
         parsed_trades = []
@@ -579,5 +637,50 @@ class OKXClient:
             "candles_1m": candles_1m,
             "candles_5m": candles_5m,
             "candles_15m": candles_15m,
+            "candles_1h": candles_1h,
+        }
+
+    def get_simple_scalp_data(self, inst_id: str) -> dict:
+        """
+        Lightweight market data for SIMPLE_SCALP_MODE.
+        Chỉ lấy phần cần cho trigger nhanh:
+        - price/ticker
+        - candles 1m
+        - candles 5m khi cần M5 wave/pinbar
+        - candles 15m khi cần vùng hỗ trợ/kháng cự
+        """
+        ticker = self.get_ticker(inst_id)
+        candles_1m = self.get_candles(inst_id, bar="1m", limit=120)
+        strategy = str(getattr(config, "SIMPLE_SCALP_STRATEGY", "btc_sync")).lower()
+        need_m5 = bool(getattr(config, "SIMPLE_SCALP_REQUIRE_M5_WAVE", True)) or (
+            strategy == "m15_m5_retest"
+        )
+        need_m15 = (
+            strategy == "m15_m5_retest"
+            or bool(getattr(config, "ATR_BRAKE_ENABLED", False))
+            or bool(getattr(config, "HARD_GATE_EMA200_ENABLED", False))
+        )
+        need_h1 = bool(getattr(config, "HARD_GATE_EMA200_ENABLED", False))
+        candles_5m = self.get_candles(inst_id, bar="5m", limit=50) if need_m5 else []
+        m15_limit = 50
+        if need_m15 and bool(getattr(config, "ATR_BRAKE_ENABLED", False)):
+            atr_need = (
+                int(getattr(config, "ATR_BRAKE_PERIOD", 14))
+                + int(getattr(config, "ATR_BRAKE_LOOKBACK_BARS", 96))
+                + 5
+            )
+            m15_limit = max(m15_limit, atr_need)
+        if need_m15 and bool(getattr(config, "HARD_GATE_EMA200_ENABLED", False)):
+            m15_limit = max(m15_limit, 220)
+        m15_limit = min(300, m15_limit)
+        candles_15m = self.get_candles(inst_id, bar="15m", limit=m15_limit) if need_m15 else []
+        candles_1h = self.get_candles(inst_id, bar="1H", limit=220) if need_h1 else []
+        return {
+            "ticker": ticker,
+            "price": float(ticker.get("last", "0")) if ticker else 0,
+            "candles_1m": candles_1m,
+            "candles_5m": candles_5m,
+            "candles_15m": candles_15m,
+            "candles_1h": candles_1h,
         }
 
